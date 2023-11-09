@@ -9,6 +9,9 @@ format:
   pdf: 
     mainfont: Zilla Slab
     sansfont: Montserrat
+    fontsize: 10pt
+    monofontoptions: 
+      Scale=0.5
 bibliography: refs.bib
 csl: nature.csl
 editor: visual
@@ -16,7 +19,17 @@ editor_options:
   chunk_output_type: console
 ---
 
-This practice project is an exploration of pharmaceutical data analysis techniques using sample datasets obtained from the Harvard Dataverse at <https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/51B6NK>[@DVN_2019]. The project focuses on applying Clinical Data Interchange Standards Consortium (CDISC) Study Data Tabulation Model (SDTM) standards to real-world clinical trial data, with the goal of creating Analysis Data Model (ADaM) datasets and generating statistical reports typical of those used in the pharmaceutical industry. This hands-on exercise serves as a foundation for developing practical skills in statistical programming within the pharma sector.
+# Create DM dataset
+
+This mini learning project focuses on applying Clinical Data Interchange Standards Consortium (CDISC) Study Data Tabulation Model (SDTM) standards to real-world-like clinical trial data, with the goal of creating Analysis Data Model (ADaM) datasets and generating statistical reports typical of those used in the pharmaceutical industry. This hands-on exercise serves as a foundation for developing practical skills in statistical programming within the pharma sector.
+
+This practice project is an exploration of pharmaceutical data analysis techniques. First I'll dabble around using the sample datasets obtained from the SASCRUNCH TRAINING at <https://www.sascrunchtraining.com/clinical-project-1.html> to create a SDTM DM dataset by brute force. Then I'll have a look at the pharmaverse way of doing a similar tasks using the metacore object to create an ADaM dataset.
+
+Download and unzip data.
+
+```{r}
+if (length(list.files("data/")) == 0) system("./code/get_data.sh")
+```
 
 Load packages.
 
@@ -28,49 +41,118 @@ library(metatools)
 library(pharmaversesdtm)
 library(admiral)
 library(xportr)
-library(dplyr)
-library(tidyr)
-library(lubridate)
-library(stringr)
+library(readxl)
+library(xml2)
 ```
 
-Load meta data and SDTM data.
+Import data
 
 ```{r}
 #| message: false
-meta <- 
-  jsonlite::read_json("data/meta.json")
+death <- read_excel("data/Project_1_SDTM_DM/DEATH.xlsx")
+dm <- read_excel("data/Project_1_SDTM_DM/DM.xlsx")
+ds <- read_excel("data/Project_1_SDTM_DM/DS.xlsx")
+ex <- read_excel("data/Project_1_SDTM_DM/EX.xlsx")
+spcpkb <- read_excel("data/Project_1_SDTM_DM/SPCPKB1.xlsx")
 
-file_names <- list.files("data/", "*.csv", full.names = TRUE)
-
-all_data <- 
-  file_names %>% 
-  map(read_csv) %>% 
-  set_names(str_remove(basename(file_names), ".csv"))
+cdm_vars <- read_excel("data/cdm_variables.xlsx") # variable descriptions
+dm_only <- read_excel("data/dm_only.xlsx") # this is the SDTM specification
 ```
 
-Based on the JSON metadata provided, here's a short description of each file:
+Let's build a SDTM DM dataset based on the dm_only specification.
 
--   `ae`: This contains Adverse Events data, which likely includes details about any undesirable experiences associated with the use of a medical product in a patient.
--   `dm`: This file contains Subject Demographics data, detailing information about the trial subjects such as age, sex, race, and other demographic details.
--   `eg`: This file includes Electrogardiogram data, which are records of the electrical activity of the heart over a period of time.
--   `lb`: This contains Laboratory Findings data, providing information from laboratory tests conducted during the study.
--   `mh`: This file holds Medical History data, containing historical health information about the subjects enrolled in the clinical study.
--   `pe`: This contains Physical Examination data, documenting the findings from physical exams conducted on study subjects.
--   `vs`: This file contains Vital Signs data, which includes measurements like blood pressure, heart rate, body temperature, and respiratory rate.
+```{r}
+DTHDTC <-
+  dm %>%
+  left_join(death %>% filter(!is.na(DTHCAUSE))) %>%
+  pull(DTH_DAT)
 
-Each file is in a comma-separated values format and was created for the purpose of demonstrating the use of CDISC-SDTM formatted datasets.
+sdtm_dm <-
+  dm %>%
+  transmute(
+    STUDYID = "XYZ",
+    DOMAIN = "DM",
+    USUBJID = paste(STUDYID, SUBJECT, sep = "/"),
+    SUBJID = SUBJECT,
+    RFSTDTC = if_else(
+      spcpkb$PSCHDAY == 1 & spcpkb$PART == "A",
+      paste0(spcpkb$IPFD1DAT, spcpkb$IPFD1TIM),
+      NA_character_
+    ) %>% if_else(. == "NANA", NA, .) %>%
+      na.omit() %>%
+      pluck(1),
+    RFENDTC = if_else(
+      spcpkb$PSCHDAY == 1 & spcpkb$PART == "A",
+      paste0(spcpkb$IPFD1DAT, spcpkb$IPFD1TIM),
+      NA_character_
+    ) %>% if_else(. == "NANA", NA, .) %>%
+      na.omit() %>%
+      pluck(-1),
+    RFXSTDTC = "some date",
+    RFXENDTC = "some other date",
+    RFPENDTC = c(RFXSTDTC[1], ds$DSSTDAT, RFXENDTC[1]),
+    DTHDTC = DTHDTC,
+    DTHFL = if_else(is.na(DTHDTC), DTHDTC, "Y"),
+    SITEID = dm$CENTRE,
+    BRTHDTC = dm$BRTHDAT,
+    AGE = dm$AGE,
+    AGEU = if_else(dm$AGEU == "C29848", "YEARS", dm$AGEU),
+    SEX = case_when(
+      dm$SEX == "C20197" ~ "M",
+      dm$SEX == "C16576" ~ "F",
+      TRUE ~ "U"
+    ),
+    RACE = if_else(dm$RACE == "C41260", "ASIAN", "WHITE"),
+    ETHNIC = if_else(dm$ETHNIC == "C41222", "NOT HISPANIC OR LATINO", dm$ETHNIC),
+    ARMCD = if_else(!is.na(RFSTDTC), "A01-A02-A03", "NOTASSGN"), 
+    # I don't get it. I don't think I have access to CDM.IE.IEYN
+    ARM = if_else(ARMCD == "NOTASSIGN", "Not Assigned", ARMCD), 
+    # Again, I don't know what SDTM.TA is...
+    ACTARMCD = ARMCD,
+    ACTARM = ARM,
+    COUNTRY = "See <DM_Details> tab",
+    DMDTC = dm$VIS_DAT,
+    CENTRE = dm$CENTRE,
+    PART = dm$PART,
+    RACEOTH = str_to_upper(dm$RACEOTH),
+    VISITDTC = dm$VIS_DAT
+  )
+```
 
-::: callout-note
-Does not seem like I need to create a metacore object as all data are in SDTM format... But if want to programatically manage and validate my data, maybe I should figure out how to create such a metacore object???
-:::
+Geez... I see the benefits of automating this process with the metacore and metatools packages. :) Also, I could not figure out how to create some of the variables because as far as I can tell, I don't have the necessary data but we're just learning.
+
+All 28 variables from the `dm_only` have been created.
+
+```{r}
+sdtm_dm 
+```
 
 # Create ADSL dataset
 
+I'll create an ADaM subject-level dataset using pharmaverse example data.
+
 ADSL stands for Analysis Data Subject-Level Dataset. It's part of the ADaM (Analysis Data Model) standards provided by CDISC for use in statistical analysis related to clinical trials. The ADSL dataset contains one record per subject and includes key variables necessary for analysis, such as demographic information, treatment information, and other subject-level data. It's the foundational dataset used in many statistical analyses and is often required for regulatory submissions to agencies like the FDA.
 
-::: callout-note
-No way around it. Gotta figure out how to create a metacore object. The meta data json file from the Harward site does not contain the required information to create a metacore object.
-:::
+Create metacore object.
+
+```{r}
+doc <- read_xml(metacore_example("SDTM_define.xml"))
+xml_ns_strip(doc)
+```
+
+```{r}
+ds_spec2 <- xml_to_ds_spec(doc)
+ds_vars <- xml_to_ds_vars(doc)
+var_spec <- xml_to_var_spec(doc)
+value_spec <- xml_to_value_spec(doc)
+code_list <- xml_to_codelist(doc)
+derivations <- xml_to_derivations(doc)
+```
+
+```{r}
+meta_obj <- metacore(ds_spec2, ds_vars, var_spec, value_spec, derivations, code_list)
+meta_dm <- meta_obj %>%
+  select_dataset("DM", simplify = TRUE)
+```
 
 # References
